@@ -1,0 +1,107 @@
+name: Bitkub stream recorder
+
+# Paper-trading research, not financial advice. Public Bitkub market data only: no orders, no exchange API keys.
+# Each run records for 5.5 hours. At 5 h 20 min it starts the next run itself, so two runs overlap for about
+# 8-10 minutes (the duplicates are removed later by `merge`). GitHub's timer below is only a backup.
+# The data is ENCRYPTED with the STREAM_DATA_KEY secret and uploaded to a monthly GitHub Release (data-YYYYMM).
+# Bitkub's User Agreement (clauses 4.2.1-4.2.3) does not allow redistributing its price data, so nothing readable is
+# published and nothing is committed to the repository.
+on:
+  schedule:
+    - cron: '23 * * * *'  # backup only: starts a run if none is recording (e.g. a hand-over failed)
+  workflow_dispatch:      # manual start from the Actions tab (and how each run starts the next one)
+
+permissions:
+  contents: write   # create the monthly release and upload the encrypted files
+  actions: write    # start the next run, see whether a run is already recording
+
+# No concurrency group on purpose: the next run must start while the current one is still recording.
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check that the data key is set (stop if not, so nothing unencrypted is ever kept)
+        env:
+          STREAM_DATA_KEY: ${{ secrets.STREAM_DATA_KEY }}
+        run: |
+          if [ ${#STREAM_DATA_KEY} -lt 20 ]; then
+            echo "::error::Repository secret STREAM_DATA_KEY is missing or shorter than 20 characters. Add it under Settings > Secrets and variables > Actions. Nothing was recorded."
+            exit 1
+          fi
+
+      - name: Skip if another run is already recording (timer runs only)
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          running=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow stream.yml --status in_progress --json databaseId --jq 'length')
+          echo "Runs recording now (including this one): $running"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$running" -gt 1 ]; then
+            echo "Another run is recording; this timer run does nothing."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run unit tests (stop if anything is broken)
+        if: steps.guard.outputs.skip != 'true'
+        run: python -m unittest -v test_bitkub_stream_collector.py
+
+      - name: Record public Bitkub streams for 5.5 hours
+        if: steps.guard.outputs.skip != 'true'
+        timeout-minutes: 340
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python bitkub_stream_collector.py run --minutes 330 --handoff-at 320 --out out \
+            --handoff-cmd "gh workflow run stream.yml --repo $GITHUB_REPOSITORY --ref $GITHUB_REF_NAME"
+
+      - name: Encrypt and upload the data to this month's release
+        if: always() && steps.guard.outputs.skip != 'true'
+        env:
+          STREAM_DATA_KEY: ${{ secrets.STREAM_DATA_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for d in out/*/; do
+            id=$(basename "$d")
+            tar -C out -cf "stream_${id}.tar" "$id"
+            openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 -md sha256 -pass env:STREAM_DATA_KEY \
+              -in "stream_${id}.tar" -out "stream_${id}.tar.enc"
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -pass env:STREAM_DATA_KEY \
+              -in "stream_${id}.tar.enc" | cmp - "stream_${id}.tar"   # check it decrypts before uploading
+            tag="data-${id:0:6}"
+            gh release view "$tag" >/dev/null 2>&1 \
+              || gh release create "$tag" --title "Encrypted Bitkub stream data ${id:0:4}-${id:4:2}" \
+                   --notes "Encrypted with the owner's key (AES-256). Paper-trading research, not financial advice." \
+              || gh release view "$tag" >/dev/null
+            ok=0
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "stream_${id}.tar.enc" --clobber; then ok=1; break; fi
+              echo "Upload attempt $attempt failed, retrying..."
+              sleep 15
+            done
+            [ "$ok" = 1 ] || { echo "::error::upload failed for stream_${id}.tar.enc"; exit 1; }
+            echo "Uploaded stream_${id}.tar.enc ($(du -h "stream_${id}.tar.enc" | cut -f1)) to release $tag"
+          done
+
+      - name: Summary (counts only, no prices)
+        if: always() && steps.guard.outputs.skip != 'true'
+        run: |
+          {
+            echo '### Run'; echo '```'; cat out/*/run.csv 2>/dev/null || echo "no run.csv"; echo '```'
+            echo '### Hourly totals (trades, side_blank, trades_ob, book10, bbo, rest_fills ... conns_up, reconnects, clock_offset_ms)'
+            echo '```'; grep -h ',ALL,' out/*/heartbeat.csv 2>/dev/null || echo "no heartbeat"; echo '```'
+            echo "### Gaps logged: $(cat out/*/gaps.csv 2>/dev/null | grep -vc '^conn,' || true)"
+          } >> "$GITHUB_STEP_SUMMARY"
