@@ -88,6 +88,26 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(c.norm_sym("THB_PEPE"), "PEPE_THB")
         self.assertEqual(c.norm_sym("market.trade.thb_usdt"), "USDT_THB")
         self.assertEqual(c.stream_name("trade", "F_THB"), "market.trade.thb_f")
+        self.assertEqual(c.norm_sym("USDT_BTC"), "BTC_USDT")              # USDT pairs: quote first, like THB
+        self.assertEqual(c.norm_sym("market.ticker.usdt_xaut"), "XAUT_USDT")
+        self.assertEqual(c.stream_name("trade", "BTC_USDT"), "market.trade.usdt_btc")
+
+    def test_symbol_list(self):
+        self.assertEqual(len(c.COINS), 20)                                # frozen Test J list, unchanged
+        self.assertEqual(len(c.USDT_PAIRS), 10)
+        self.assertTrue(all(s.endswith("_USDT") for s in c.USDT_PAIRS))
+        self.assertEqual(len(set(c.SYMBOLS)), 31)
+
+    def test_usdt_pair_trade_is_recorded_under_its_own_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = c.Recorder(Path(d), ["BTC_USDT", "USDT_THB"])
+            r.on_market(json.dumps({"stream": "market.trade.usdt_btc", "sym": "USDT_BTC", "txn": "b1",
+                                    "rat": 80263.6, "amt": 0.010932, "ts": T0}), T0 + 200)
+            r.release_trades(T0 + 200, force=True)
+            r.w.close()
+            day = Path(d) / c.day_of(T0)
+            self.assertEqual(c.read_gz_csv(day / "trades_BTC_USDT.csv.gz")[0][2:5], ["b1", "80263.6", "0.010932"])
+            self.assertFalse((day / "trades_USDT_THB.csv.gz").exists())
 
     def test_trade_keeps_exact_decimal_text(self):
         m = c.loads('{"stream":"market.trade.thb_pepe","sym":"THB_PEPE","txn":"228","rat":0.00017058,'
