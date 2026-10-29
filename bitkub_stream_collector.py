@@ -5,7 +5,7 @@ bitkub_stream_collector.py — second Bitkub data collector (fast stream, for a 
 Paper-trading research, not financial advice. Reads PUBLIC Bitkub market data only (WebSocket streams + two public
 REST calls). No orders, no accounts, no exchange API keys. Standard library only, except `decrypt` on the owner's PC.
 
-Same 20 coins as Test J, plus USDT_THB. Connections (checked live 2026-10-29; see knowledge/bitkub-stream-data.md):
+Same 20 coins as Test J, plus USDT_THB and every USDT pair (10, list fixed 2026-10-29). Connections (checked live 2026-10-29; see knowledge/bitkub-stream-data.md):
   wss://api.bitkub.com/websocket-api/market.trade.thb_x,...,market.ticker.thb_x,...   (1 connection, all coins)
   wss://api.bitkub.com/websocket-api/orderbook/<pairing_id>                         (1 connection per coin)
 (The docs write `orderbook.<id>`; only the `orderbook/<id>` path answers. The docs also call market.trade closed since
@@ -56,7 +56,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 COINS = ["RLUSD_THB", "PEPE_THB", "ASTER_THB", "PUMP_THB", "STRK_THB", "BONK_THB", "BREV_THB", "PENGU_THB",
          "CHIP_THB", "USD1_THB", "TRUMP_THB", "WLFI_THB", "F_THB", "AVA_THB", "WIF_THB", "SHIB_THB", "JUP_THB",
          "CAKE_THB", "PARTI_THB", "CFG_THB"]  # frozen Test J list
-SYMBOLS = COINS + ["USDT_THB"]
+# Rule: every pair with quote_asset USDT and status "active" in GET /api/v3/market/symbols on 2026-10-29 12:59 UTC.
+# All 10 are "broker" pairs (orders routed to an outside venue); see knowledge/bitkub-stream-data.md.
+USDT_PAIRS = ["BTC_USDT", "XRP_USDT", "ETH_USDT", "DOGE_USDT", "ADA_USDT", "SOL_USDT", "BCH_USDT", "SUI_USDT",
+              "XAUT_USDT", "NEAR_USDT"]
+SYMBOLS = COINS + ["USDT_THB"] + USDT_PAIRS
 HOST = "api.bitkub.com"
 REST = f"https://{HOST}/api/v3"
 WS_PATH = "/websocket-api/"
@@ -110,6 +114,7 @@ class WebSocket:
     def __init__(self, sock: Any, buf: bytes = b"", data_timeout: float = DATA_TIMEOUT_S,
                  clock: Callable[[], float] = time.monotonic):
         self.sock, self.buf, self.data_timeout, self.clock = sock, buf, data_timeout, clock
+        self.pos = 0  # start of unread bytes: frames are read in place, the buffer is copied once per network read
         self.parts: List[bytes] = []
 
     @classmethod
@@ -136,28 +141,28 @@ class WebSocket:
         return cls(sock, buf)
 
     def _frame(self) -> Optional[Tuple[bool, int, bytes]]:
-        b = self.buf
-        if len(b) < 2:
+        b, s = self.buf, self.pos
+        if len(b) - s < 2:
             return None
-        n, i = b[1] & 127, 2
+        n, i = b[s + 1] & 127, s + 2
         if n == 126:
-            if len(b) < 4:
+            if len(b) - s < 4:
                 return None
-            n, i = struct.unpack(">H", b[2:4])[0], 4
+            n, i = struct.unpack(">H", b[s + 2:s + 4])[0], s + 4
         elif n == 127:
-            if len(b) < 10:
+            if len(b) - s < 10:
                 return None
-            n, i = struct.unpack(">Q", b[2:10])[0], 10
+            n, i = struct.unpack(">Q", b[s + 2:s + 10])[0], s + 10
         mask = b""
-        if b[1] & 128:
+        if b[s + 1] & 128:
             mask, i = b[i:i + 4], i + 4
         if len(b) < i + n:
             return None
         p = b[i:i + n]
         if mask:
             p = bytes(x ^ mask[k % 4] for k, x in enumerate(p))
-        self.buf = b[i + n:]
-        return bool(b[0] & 128), b[0] & 15, p
+        self.pos = i + n
+        return bool(b[s] & 128), b[s] & 15, p
 
     def send(self, opcode: int, payload: bytes = b"") -> None:
         m = os.urandom(4)  # clients must mask
@@ -180,7 +185,7 @@ class WebSocket:
                     continue
                 if not d:
                     raise ConnectionClosed("socket closed")
-                self.buf += d
+                self.buf, self.pos = self.buf[self.pos:] + d, 0
                 continue
             fin, op, p = f
             if op == 9:
@@ -212,10 +217,11 @@ def split_lines(text: str) -> List[str]:
 
 
 def norm_sym(s: str) -> str:
-    """'THB_PEPE' / 'market.trade.thb_pepe' -> 'PEPE_THB'."""
+    """Bitkub stream form (quote first) -> ours: 'THB_PEPE' / 'market.trade.thb_pepe' -> 'PEPE_THB',
+    'USDT_BTC' -> 'BTC_USDT', 'THB_USDT' -> 'USDT_THB'."""
     s = s.split(".")[-1].upper()
     a, b = s.split("_", 1)
-    return f"{b}_{a}" if a == "THB" else s
+    return f"{b}_{a}" if a in ("THB", "USDT") else s
 
 
 def stream_name(kind: str, sym: str) -> str:
