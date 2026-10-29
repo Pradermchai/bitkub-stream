@@ -93,10 +93,11 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(c.stream_name("trade", "BTC_USDT"), "market.trade.usdt_btc")
 
     def test_symbol_list(self):
-        self.assertEqual(len(c.COINS), 20)                                # frozen Test J list, unchanged
-        self.assertEqual(len(c.USDT_PAIRS), 10)
-        self.assertTrue(all(s.endswith("_USDT") for s in c.USDT_PAIRS))
-        self.assertEqual(len(set(c.SYMBOLS)), 31)
+        self.assertEqual(len(set(c.COINS)), 40)                           # frozen Test P list, unchanged
+        self.assertTrue(all(s.endswith("_THB") for s in c.COINS))
+        self.assertNotIn("PEPE_THB", c.COINS)                             # old broker coins are gone
+        self.assertEqual(c.SYMBOLS[-1], "USDT_THB")
+        self.assertEqual(len(set(c.SYMBOLS)), 41)
 
     def test_usdt_pair_trade_is_recorded_under_its_own_name(self):
         with tempfile.TemporaryDirectory() as d:

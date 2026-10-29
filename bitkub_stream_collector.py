@@ -5,7 +5,8 @@ bitkub_stream_collector.py — second Bitkub data collector (fast stream, for a 
 Paper-trading research, not financial advice. Reads PUBLIC Bitkub market data only (WebSocket streams + two public
 REST calls). No orders, no accounts, no exchange API keys. Standard library only, except `decrypt` on the owner's PC.
 
-Same 20 coins as Test J, plus USDT_THB and every USDT pair (10, list fixed 2026-10-29). Connections (checked live 2026-10-29; see knowledge/bitkub-stream-data.md):
+40 Bitkub "exchange" THB coins (real local order books; frozen Test P list, 2026-10-30) plus USDT_THB as the
+THB/USD reference. Connections (checked live 2026-10-29; see knowledge/bitkub-stream-data.md):
   wss://api.bitkub.com/websocket-api/market.trade.thb_x,...,market.ticker.thb_x,...   (1 connection, all coins)
   wss://api.bitkub.com/websocket-api/orderbook/<pairing_id>                         (1 connection per coin)
 (The docs write `orderbook.<id>`; only the `orderbook/<id>` path answers. The docs also call market.trade closed since
@@ -53,14 +54,15 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-COINS = ["RLUSD_THB", "PEPE_THB", "ASTER_THB", "PUMP_THB", "STRK_THB", "BONK_THB", "BREV_THB", "PENGU_THB",
-         "CHIP_THB", "USD1_THB", "TRUMP_THB", "WLFI_THB", "F_THB", "AVA_THB", "WIF_THB", "SHIB_THB", "JUP_THB",
-         "CAKE_THB", "PARTI_THB", "CFG_THB"]  # frozen Test J list
-# Rule: every pair with quote_asset USDT and status "active" in GET /api/v3/market/symbols on 2026-10-29 12:59 UTC.
-# All 10 are "broker" pairs (orders routed to an outside venue); see knowledge/bitkub-stream-data.md.
-USDT_PAIRS = ["BTC_USDT", "XRP_USDT", "ETH_USDT", "DOGE_USDT", "ADA_USDT", "SOL_USDT", "BCH_USDT", "SUI_USDT",
-              "XAUT_USDT", "NEAR_USDT"]
-SYMBOLS = COINS + ["USDT_THB"] + USDT_PAIRS
+# Frozen Test P list (reports/test_p_plan.md): output of select_exchange_coins.py run 2026-10-30 ≈ 06:40 Bangkok.
+# Rule: active, unfrozen "exchange" THB pairs, no pegged coins, median daily THB value 23-29 Oct 2026 >= 200k, top 40.
+# The old Test J coins and USDT pairs were Bitkub "broker" pairs (hidden orders, knowledge/bitkub-broker-pairs.md).
+COINS = ["BTC_THB", "NEAR_THB", "ETH_THB", "XRP_THB", "DOGE_THB", "WLD_THB", "SOL_THB", "IOST_THB", "CRV_THB",
+         "ADA_THB", "LUNA_THB", "XLM_THB", "OP_THB", "KUB_THB", "BNB_THB", "EPIC_THB", "GALA_THB", "ENA_THB",
+         "ONDO_THB", "LINK_THB", "UNI_THB", "HBAR_THB", "SUI_THB", "REALX_THB", "MAVIA_THB", "BCH_THB", "ORDER_THB",
+         "HYPE_THB", "REZ_THB", "SAND_THB", "ZIL_THB", "DOT_THB", "MOVR_THB", "SQD_THB", "ARB_THB", "BMT_THB",
+         "QNT_THB", "JFIN_THB", "ZRC_THB", "SOPH_THB"]
+SYMBOLS = COINS + ["USDT_THB"]
 HOST = "api.bitkub.com"
 REST = f"https://{HOST}/api/v3"
 WS_PATH = "/websocket-api/"

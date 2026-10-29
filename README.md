@@ -1,11 +1,12 @@
 # Bitkub stream recorder
 
 Paper-trading research, not financial advice. This repository only **records public Bitkub market data** (every trade,
-the top 10 order-book levels, the best bid/ask) for 21 coins through Bitkub's public WebSocket streams. It places no
-orders and holds no exchange API keys.
+the top 10 order-book levels, the best bid/ask) for 40 Bitkub "exchange" THB coins plus USDT/THB, through Bitkub's
+public WebSocket streams. It places no orders and holds no exchange API keys.
 
 - `bitkub_stream_collector.py`: the recorder (Python standard library only).
 - `test_bitkub_stream_collector.py`: its tests (synthetic data; run before every recording).
+- `select_exchange_coins.py`: the frozen rule that picked the 40 coins (kept for the record; not run by the workflow).
 - `.github/workflows/stream.yml`: runs the recorder back-to-back on GitHub Actions (5.5-hour runs that overlap by a
   few minutes; an hourly timer restarts the chain if it ever stops).
 
