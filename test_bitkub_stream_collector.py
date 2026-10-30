@@ -3,10 +3,13 @@ Run: python -m unittest -v test_bitkub_stream_collector.py"""
 from __future__ import annotations
 
 import base64
+import contextlib
 import gzip
+import io
 import json
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -411,11 +414,57 @@ class TestMerge(TempDirCase):
             self.assertEqual(len(f.read().strip().split("\n")), 3)  # header + one gap per run
 
 
+class TestHandoffScript(unittest.TestCase):
+    ENV = {"GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "100", "GITHUB_REF_NAME": "main"}
+    NOW = 1_800_000_000.0   # 2027-01-15 08:00 UTC
+
+    def runs(self, *rs):
+        import datetime as dt
+        return json.dumps([{"databaseId": i, "status": s,
+                            "createdAt": dt.datetime.fromtimestamp(self.NOW - age, dt.timezone.utc)
+                            .strftime("%Y-%m-%dT%H:%M:%SZ")} for i, s, age in rs])
+
+    def call(self, listing, dispatch_rc=0):
+        import handoff
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd[:3])
+            if cmd[1:3] == ["run", "list"]:
+                if listing is None:
+                    raise subprocess.CalledProcessError(1, cmd)
+                return subprocess.CompletedProcess(cmd, 0, listing, "")
+            return subprocess.CompletedProcess(cmd, dispatch_rc, "", "boom" if dispatch_rc else "")
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = handoff.main("stream.yml", run=run, now=lambda: self.NOW, env=self.ENV)
+        return rc, out.getvalue().strip(), [c for c in calls if c[1:3] == ["workflow", "run"]]
+
+    def test_newer_recording_run_skips(self):
+        rc, said, started = self.call(self.runs((100, "in_progress", 19000), (130, "in_progress", 7000)))
+        self.assertEqual((rc, said, started), (0, "skipped: newer run 130 is already recording", []))
+
+    def test_starts_next_run_otherwise(self):
+        for listing in (self.runs((100, "in_progress", 19000), (90, "in_progress", 25000)),   # older chain only
+                        self.runs((100, "in_progress", 19000), (130, "in_progress", 10)),      # timer run, 10 s old
+                        self.runs((100, "in_progress", 19000), (130, "completed", 7000)),
+                        None, "not json"):                                                    # check failed
+            rc, said, started = self.call(listing)
+            self.assertEqual((rc, said, len(started)), (0, "started next run", 1))
+
+    def test_dispatch_failure_reported(self):
+        rc, said, _ = self.call(self.runs(), dispatch_rc=2)
+        self.assertEqual((rc, said), (2, "boom"))
+
+
 class TestHandoffAndDecrypt(TempDirCase):
     def test_handoff_marker_only_on_success(self):
         ok = c.run_handoff(f'"{sys.executable}" -c "pass"', self.dir)
         self.assertEqual(ok, "started next run")
         self.assertTrue((self.dir / "HANDOFF_DONE").exists())
+        (self.dir / "HANDOFF_DONE").unlink()
+        said = c.run_handoff(f'"{sys.executable}" -c "print(\'skipped: newer run 7 is recording\')"', self.dir)
+        self.assertEqual(said, "skipped: newer run 7 is recording")
         (self.dir / "HANDOFF_DONE").unlink()
         bad = c.run_handoff(f'"{sys.executable}" -c "raise SystemExit(3)"', self.dir)
         self.assertTrue(bad.startswith("failed (3)"))

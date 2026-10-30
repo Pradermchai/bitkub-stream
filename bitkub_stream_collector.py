@@ -648,7 +648,8 @@ def run_handoff(cmd: str, out_root: Path) -> str:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
         if r.returncode == 0:
             (out_root / "HANDOFF_DONE").write_text(utc(now_ms()), encoding="utf-8")
-            return "started next run"
+            said = (r.stdout or "").strip().splitlines()
+            return said[-1][:150] if said else "started next run"   # handoff.sh says started / skipped
         return f"failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:150]}"
     except Exception as exc:  # noqa: BLE001
         return f"failed: {exc!r}"[:160]
