@@ -64,7 +64,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python bitkub_stream_collector.py run --minutes 330 --handoff-at 320 --out out \
-            --handoff-cmd "gh workflow run stream.yml --repo $GITHUB_REPOSITORY --ref $GITHUB_REF_NAME"
+            --handoff-cmd "python handoff.py stream.yml"
 
       - name: Encrypt and upload the data to this month's release
         if: always() && steps.guard.outputs.skip != 'true'

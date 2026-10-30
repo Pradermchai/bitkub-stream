@@ -54,7 +54,7 @@ jobs:
 
       - name: Run unit tests (stop if anything is broken)
         if: steps.guard.outputs.skip != 'true'
-        run: python -m unittest -v test_binance_th_collector.py
+        run: python -m unittest -v test_binance_th_collector.py test_bitkub_stream_collector.py
 
       - name: Record public Binance TH streams for 5.5 hours
         if: steps.guard.outputs.skip != 'true'
@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python binance_th_collector.py run --minutes 330 --handoff-at 320 --out out \
-            --handoff-cmd "gh workflow run binance_th.yml --repo $GITHUB_REPOSITORY --ref $GITHUB_REF_NAME"
+            --handoff-cmd "python handoff.py binance_th.yml"
 
       - name: Encrypt and upload the data to this month's release
         if: always() && steps.guard.outputs.skip != 'true'
