@@ -1,0 +1,107 @@
+name: Binance TH reachability probe
+
+# Paper-trading research, not financial advice. Manual run only. Checks whether GitHub's servers can reach Binance TH's
+# PUBLIC market data (no account, no keys, no orders): REST /api/v1/time, the BTCTHB book, and 20 s of the public
+# WebSocket. The job FAILS if any of them is refused, so its conclusion alone answers the question. Prints no prices.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Probe Binance TH public REST and WebSocket
+        run: |
+          cat > probe.py <<'PY'
+          """Binance TH reachability probe: public REST + 20 s of the public WebSocket. Exit 1 if anything is refused."""
+          import base64, json, os, socket, ssl, struct, sys, time, urllib.request
+
+          UA = {"User-Agent": "quant-brain-research (public data, paper study)"}
+          fails = []
+
+
+          def rest(path):
+              try:
+                  with urllib.request.urlopen(urllib.request.Request("https://api.binance.th" + path, headers=UA), timeout=20) as r:
+                      body = json.loads(r.read())
+                  print("OK  ", path, "HTTP", r.status, "keys:", list(body)[:4] if isinstance(body, dict) else type(body).__name__)
+                  return body
+              except Exception as e:  # noqa: BLE001
+                  print("FAIL", path, repr(e)[:300])
+                  fails.append(path)
+
+
+          rest("/api/v1/time")
+          d = rest("/api/v1/depth?symbol=BTCTHB&limit=5")
+          if d is not None and not (d.get("bids") and d.get("asks")):
+              print("FAIL depth has an empty side"); fails.append("depth-empty")
+
+          host, path = "nbstream.binance.th", "/w3w/wsa/stream"
+          msgs, kinds = 0, set()
+          try:
+              s = ssl.create_default_context().wrap_socket(socket.create_connection((host, 443), timeout=20), server_hostname=host)
+              s.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         f"Sec-WebSocket-Key: {base64.b64encode(os.urandom(16)).decode()}\r\nSec-WebSocket-Version: 13\r\n"
+                         f"User-Agent: {UA['User-Agent']}\r\n\r\n").encode())
+              buf = b""
+              while b"\r\n\r\n" not in buf:
+                  chunk = s.recv(4096)
+                  if not chunk:
+                      raise ConnectionError("closed during handshake")
+                  buf += chunk
+              head, buf = buf.split(b"\r\n\r\n", 1)
+              status = head.split(b"\r\n")[0].decode(errors="replace")
+              print("WS handshake:", status)
+              if " 101 " not in status:
+                  raise ConnectionError("handshake refused: " + status)
+              sub = json.dumps({"method": "SUBSCRIBE", "params": ["btcthb@trade", "btcthb@depth@100ms"], "id": 1}).encode()
+              m = os.urandom(4)
+              s.sendall(bytes([0x81, 0x80 | len(sub)]) + m + bytes(x ^ m[k % 4] for k, x in enumerate(sub)))
+              s.settimeout(2)
+              end = time.time() + 20
+              while time.time() < end:
+                  try:
+                      chunk = s.recv(65536)
+                  except socket.timeout:
+                      continue
+                  if not chunk:
+                      raise ConnectionError("socket closed by server")
+                  buf += chunk
+                  while len(buf) >= 2:
+                      n, i = buf[1] & 127, 2
+                      if n == 126:
+                          if len(buf) < 4: break
+                          n, i = struct.unpack(">H", buf[2:4])[0], 4
+                      elif n == 127:
+                          if len(buf) < 10: break
+                          n, i = struct.unpack(">Q", buf[2:10])[0], 10
+                      if len(buf) < i + n: break
+                      op, p, buf = buf[0] & 15, buf[i:i + n], buf[i + n:]
+                      if op == 8:
+                          raise ConnectionError("close frame " + repr(p[:80]))
+                      if op == 1:
+                          msgs += 1
+                          j = json.loads(p)
+                          kinds.add(j.get("stream") or (j.get("data") or j).get("e") or ("reply" if "result" in j else "other"))
+                          if msgs <= 2:
+                              print("WS msg keys:", sorted(j.get("data", j)))  # keys only: no prices in the public log
+              s.close()
+              print(f"WS: {msgs} messages in 20 s, kinds: {sorted(kinds)}")
+              if not any("depth" in k for k in kinds):
+                  print("FAIL no depth messages"); fails.append("ws-no-depth")
+          except Exception as e:  # noqa: BLE001
+              print("FAIL WS", repr(e)[:300]); fails.append("ws")
+
+          print("RESULT:", "REACHABLE" if not fails else "BLOCKED/FAILED " + ",".join(fails))
+          sys.exit(1 if fails else 0)
+          PY
+          python probe.py
