@@ -662,7 +662,7 @@ def download(repo: str, out: Path, fetch: Callable[[str], Any] = http_json) -> i
     for rel in fetch(f"https://api.github.com/repos/{repo}/releases?per_page=100"):
         for a in rel.get("assets", []):
             dest = out / a["name"]
-            if a["name"].endswith(".tar.enc") and not dest.exists():
+            if a["name"].startswith("stream_") and a["name"].endswith(".tar.enc") and not dest.exists():  # not bnth_
                 urllib.request.urlretrieve(a["browser_download_url"], dest)
                 n += 1
                 print("downloaded", a["name"], flush=True)
@@ -687,7 +687,7 @@ def openssl_decrypt(blob: bytes, passphrase: str, iterations: int = KDF_ITER) ->
 def decrypt_dir(src: Path, dest: Path, passphrase: str) -> int:
     dest.mkdir(parents=True, exist_ok=True)
     n = 0
-    for f in sorted(src.glob("*.tar.enc")):
+    for f in sorted(src.glob("stream_*.tar.enc")):   # the Binance TH recorder's files are bnth_*.tar.enc
         run_id = f.name[len("stream_"):-len(".tar.enc")]
         if (dest / run_id).exists():
             continue
@@ -767,29 +767,61 @@ def merge_rows(kind: str, runs: List[List[List[str]]]) -> List[List[str]]:
     return out
 
 
-def merge_dir(runs_dir: Path, dest: Path) -> int:
-    """RUNS_DIR/<run_id>/<day>/<kind>_<SYM>.csv.gz -> DEST/<day>/<kind>_<SYM>.csv.gz, plus all runs' gaps/heartbeat."""
+def note_spans(spans: Dict[str, List[int]], paths: List[Path], runs: List[List[List[str]]]) -> None:
+    """First and last receive time seen in each run folder (for run_holes)."""
+    for p, rows in zip(paths, runs):
+        if rows:
+            t = [int(r[0]) for r in rows]
+            s = spans.setdefault(p.parent.parent.name, [min(t), max(t)])
+            s[0], s[1] = min(s[0], min(t)), max(s[1], max(t))
+
+
+def run_holes(spans: Dict[str, List[int]], min_ms: int = 60000) -> List[Tuple[int, int]]:
+    """Periods covered by no run (e.g. a failed hand-over, the timer restarting the chain up to an hour later):
+    (last row of the runs so far, first row of the next run), when longer than min_ms."""
+    out: List[Tuple[int, int]] = []
+    covered: Optional[int] = None
+    for s, e in sorted(spans.values()):
+        if covered is not None and s - covered > min_ms:
+            out.append((covered, s))
+        covered = e if covered is None else max(covered, e)
+    return out
+
+
+def merge_dir(runs_dir: Path, dest: Path, hole_conn: str = "market") -> int:
+    """RUNS_DIR/<run_id>/<day>/<kind>_<SYM>.csv.gz -> DEST/<day>/<kind>_<SYM>.csv.gz, plus all runs' gaps/heartbeat.
+    Periods when no run was recording are added to gaps.csv as `hole_conn` gaps (run_id "merge")."""
     groups: Dict[Tuple[str, str], List[Path]] = defaultdict(list)
     for p in sorted(runs_dir.glob("*/*/*.csv.gz")):
         groups[(p.parent.name, p.name)].append(p)  # run folders sort by start time
+    spans: Dict[str, List[int]] = {}
     for (day, name), paths in sorted(groups.items()):
         kind = next(k for k in sorted(HEADERS, key=len, reverse=True) if name.startswith(k + "_"))
-        rows = merge_rows(kind, [read_gz_csv(p) for p in paths])
+        runs = [read_gz_csv(p) for p in paths]
+        note_spans(spans, paths, runs)
+        rows = merge_rows(kind, runs)
         target = dest / day / name
         target.parent.mkdir(parents=True, exist_ok=True)
         with gzip.open(target, "wt", encoding="utf-8", newline="") as f:
             w = csv.writer(f, lineterminator="\n")
             w.writerow(HEADERS[kind])
             w.writerows(rows)
-    for log, header in (("gaps.csv", ["run_id"] + GAP_HEADER), ("heartbeat.csv", ["run_id"] + HB_HEADER)):
+    merge_logs(runs_dir, dest, HB_HEADER, run_holes(spans), hole_conn)
+    return len(groups)
+
+
+def merge_logs(runs_dir: Path, dest: Path, hb_header: List[str], holes: List[Tuple[int, int]], hole_conn: str) -> None:
+    for log, header in (("gaps.csv", ["run_id"] + GAP_HEADER), ("heartbeat.csv", ["run_id"] + hb_header)):
         rows = []
         for p in sorted(runs_dir.glob(f"*/{log}")):
             with open(p, newline="", encoding="utf-8") as f:
                 rows += [[p.parent.name] + r for r in list(csv.reader(f))[1:]]
+        if log == "gaps.csv":
+            rows += [["merge", hole_conn, "ALL", s, e, utc(s), utc(e), "no run recording (hand-over gap)"]
+                     for s, e in holes]
         if rows:
             (dest / log).unlink(missing_ok=True)
             append_csv(dest / log, header, rows)
-    return len(groups)
 
 
 def main() -> None:
