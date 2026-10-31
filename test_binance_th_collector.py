@@ -356,6 +356,23 @@ class MergeTests(unittest.TestCase):
             c.merge_dir(root, root / "merged")
             g = plain(root / "merged" / "gaps.csv")
             self.assertEqual(g[1][:5], ["merge", "thb", "ALL", "5000", "200000"])
+            self.assertEqual(g[2][:5], ["merge", "book_XRPTHB", "XRPTHB", "5000", "200000"])
+
+    def test_book_coverage_gaps(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            # r1 records XRP from 100; r2 overlaps it but syncs XRP only at 9000 after r1 ended at 6000; BTC only in r1
+            for run, trade_t, books in (("r1", [100, 6000], {"XRPTHB": [100, 5000], "BTCTHB": [200]}),
+                                        ("r2", [4000, 20_000], {"XRPTHB": [9000, 20_000]})):
+                rec = c.Recorder(root / run, ["XRPTHB"], [])
+                rec.w.write("trades", "XRPTHB", [[t, t, t, "1", "1", "buy", "ws"] for t in trade_t])
+                for sym, ts in books.items():
+                    rec.w.write("book10", sym, [[x] + ["1"] * 40 + [x] for x in ts])
+                rec.w.close()
+            c.merge_dir(root, root / "merged")
+            g = [r[1:5] for r in plain(root / "merged" / "gaps.csv")[1:]]
+            self.assertEqual(g, [["book_BTCTHB", "BTCTHB", "100", "200"], ["book_BTCTHB", "BTCTHB", "6000", "20000"],
+                                 ["book_XRPTHB", "XRPTHB", "6000", "9000"]])
 
     def test_decrypt_only_takes_this_recorders_files(self):
         with tempfile.TemporaryDirectory() as d:

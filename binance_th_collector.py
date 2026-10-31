@@ -731,7 +731,39 @@ def merge_dir(runs_dir: Path, dest: Path) -> int:
             w.writerow(HEADERS[kind])
             w.writerows(rows)
     bk.merge_logs(runs_dir, dest, HB_HEADER, bk.run_holes(spans), "thb")   # a hole = every THB book and trade unknown
+    append_csv(dest / "gaps.csv", ["run_id"] + GAP_HEADER, book_coverage_gaps(groups, spans))
     return len(groups)
+
+
+def book_coverage_gaps(groups: Dict[Tuple[str, str], List[Path]], spans: Dict[str, List[int]]) -> List[List[Any]]:
+    """Per coin, the times no run had a synced book: each run covers a coin from its first book row for that coin
+    (after its first snapshot) to the run's last row. Catches a run's start before its first sync when no older run
+    overlaps it, merge holes, and coins a run skipped. Rows: run_id "merge", conn book_<COIN>."""
+    first: Dict[Tuple[str, str], int] = {}
+    for (_, name), paths in groups.items():
+        if not name.startswith("book10_"):
+            continue
+        sym = name[len("book10_"):-len(".csv.gz")]
+        for p in paths:
+            rows = bk.read_gz_csv(p)
+            if rows:
+                key = (p.parent.parent.name, sym)
+                first[key] = min(first.get(key, int(rows[0][0])), int(rows[0][0]))
+    if not spans:
+        return []
+    lo, hi = min(s[0] for s in spans.values()), max(s[1] for s in spans.values())
+    out: List[List[Any]] = []
+    for sym in sorted({s for _, s in first} | {n[len("book10_"):-len(".csv.gz")] for _, n in groups
+                                              if n.startswith("book10_")}):
+        cover = sorted((first[(run, sym)], spans[run][1]) for run in spans if (run, sym) in first)
+        t = lo
+        for s, e in cover:
+            if s > t:
+                out.append(["merge", f"book_{sym}", sym, t, s, utc(t), utc(s), "no run had a synced book"])
+            t = max(t, e)
+        if t < hi:
+            out.append(["merge", f"book_{sym}", sym, t, hi, utc(t), utc(hi), "no run had a synced book"])
+    return out
 
 
 def main() -> None:
